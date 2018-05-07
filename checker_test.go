@@ -1,24 +1,30 @@
 package main
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 )
 
 func TestNewChecker(t *testing.T) {
-	_, err := newChecker(rootURL, 1)
+	_, err := newChecker(rootURL, 1, false, false, false)
 	assert.Nil(t, err)
 }
 
 func TestNewCheckerError(t *testing.T) {
-	_, err := newChecker(":", 1)
+	_, err := newChecker(":", 1, false, false, false)
+	assert.NotNil(t, err)
+}
+
+func TestNewCheckerWithMissingSitemapXML(t *testing.T) {
+	_, err := newChecker("http://localhost:8081", 1, false, false, true)
 	assert.NotNil(t, err)
 }
 
 func TestCheckerCheck(t *testing.T) {
-	for _, s := range []string{rootURL, fragmentURL} {
-		c, _ := newChecker(s, 1)
+	for _, s := range []string{rootURL, fragmentURL, baseURL, redirectURL} {
+		c, _ := newChecker(s, 1, false, false, false)
 
 		go c.Check()
 
@@ -28,26 +34,48 @@ func TestCheckerCheck(t *testing.T) {
 	}
 }
 
-func TestCheckerCheckPage(t *testing.T) {
-	c, _ := newChecker(rootURL, 256)
+func TestCheckerCheckMultiplePages(t *testing.T) {
+	c, _ := newChecker(rootURL, 1, false, false, false)
 
-	p, err := c.fetcher.Fetch(existentURL)
+	go c.Check()
+
+	i := 0
+
+	for r := range c.Results() {
+		i += strings.Count(r.String(true), "\n") + 1
+	}
+
+	assert.Equal(t, 4, i)
+}
+
+func TestCheckerCheckPage(t *testing.T) {
+	c, _ := newChecker(rootURL, 256, false, false, false)
+
+	r, err := c.fetcher.FetchLink(existentURL)
 	assert.Nil(t, err)
 
-	go c.checkPage(*p)
+	p, ok := r.Page()
+	assert.True(t, ok)
+
+	go c.checkPage(p)
 
 	assert.True(t, (<-c.Results()).OK())
 }
 
 func TestCheckerCheckPageError(t *testing.T) {
-	c, _ := newChecker(rootURL, 256)
+	for _, s := range []string{erroneousURL, invalidBaseURL} {
+		c, _ := newChecker(rootURL, 256, false, false, false)
 
-	p, err := c.fetcher.Fetch(erroneousURL)
-	assert.Nil(t, err)
+		r, err := c.fetcher.FetchLink(s)
+		assert.Nil(t, err)
 
-	go c.checkPage(*p)
+		p, ok := r.Page()
+		assert.True(t, ok)
 
-	assert.False(t, (<-c.Results()).OK())
+		go c.checkPage(p)
+
+		assert.False(t, (<-c.Results()).OK())
+	}
 }
 
 func TestStringChannelToSlice(t *testing.T) {

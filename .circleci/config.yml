@@ -31,7 +31,7 @@ jobs:
           command: rake unit_test
 
       - run:
-          name: Coverage report
+          name: Coverage Report
           command: |
             bash <(curl -s https://codecov.io/bash)
 
@@ -41,3 +41,22 @@ jobs:
             rake serve
             sleep 1
             rake integration_test
+
+      - setup_remote_docker
+
+      - run:
+          name: Docker Image
+          command: |
+            if [ $CIRCLE_BRANCH = master ]
+            then
+              curl -L https://download.docker.com/linux/static/stable/x86_64/docker-17.12.1-ce.tgz |
+              tar -xz -C /tmp
+              mv /tmp/docker/* /usr/bin
+
+              docker build -t $DOCKER_USER/muffet .
+              docker login -u $DOCKER_USER -p $DOCKER_PASSWORD
+              docker push $DOCKER_USER/muffet
+              version=$(./muffet --version)
+              docker tag $DOCKER_USER/muffet $DOCKER_USER/muffet:$version
+              docker push $DOCKER_USER/muffet:$version
+            fi

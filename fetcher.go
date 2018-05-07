@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"net/url"
 	"sync"
@@ -15,69 +16,107 @@ type fetcher struct {
 	client              *fasthttp.Client
 	connectionSemaphore semaphore
 	cache               *sync.Map
+	ignoreFragments     bool
 }
 
-func newFetcher(c int) fetcher {
+func newFetcher(c int, f bool) fetcher {
 	return fetcher{
 		&fasthttp.Client{MaxConnsPerHost: c},
 		newSemaphore(c),
 		&sync.Map{},
+		f,
 	}
 }
 
-func (f fetcher) Fetch(s string) (*page, error) {
-	s, id, err := separateFragment(s)
+func (f fetcher) FetchPage(s string) (page, error) {
+	_, p, err := f.sendRequest(s)
 
-	if err != nil {
-		return nil, err
-	}
-
-	if err, ok := f.cache.Load(s); ok && err == nil {
-		return nil, nil
-	} else if ok {
-		return nil, err.(error)
-	}
-
-	f.connectionSemaphore.Request()
-	defer f.connectionSemaphore.Release()
-
-	n, err := f.fetchHTML(s, id)
-	f.cache.Store(s, err)
-
-	if err != nil {
-		return nil, err
-	}
-
-	p := newPage(s, n)
-	return &p, nil
+	return p, err
 }
 
-func (f fetcher) fetchHTML(u, id string) (*html.Node, error) {
-	s, b, err := f.client.Get(nil, u)
+func (f fetcher) FetchLink(s string) (linkResult, error) {
+	s, fr, err := separateFragment(s)
 
 	if err != nil {
-		return nil, err
+		return linkResult{}, err
 	}
 
-	if s/100 != 2 {
-		return nil, fmt.Errorf("invalid status code %v", s)
-	}
-
-	n, err := html.Parse(bytes.NewReader(b))
-
-	if err != nil {
-		return nil, err
-	}
-
-	if id != "" {
-		if _, ok := scrape.Find(n, func(n *html.Node) bool {
-			return scrape.Attr(n, "id") == id
-		}); !ok {
-			return nil, fmt.Errorf("ID #%v not found", id)
+	if x, ok := f.cache.Load(s); ok {
+		switch x := x.(type) {
+		case int:
+			return newLinkResult(x), nil
+		case error:
+			return linkResult{}, x
 		}
 	}
 
-	return n, nil
+	c, p, err := f.sendRequestWithFragment(s, fr)
+
+	if err == nil {
+		f.cache.Store(s, c)
+	} else {
+		f.cache.Store(s, err)
+	}
+
+	return newLinkResultWithPage(c, p), err
+}
+
+func (f fetcher) sendRequestWithFragment(u, fr string) (int, page, error) {
+	c, p, err := f.sendRequest(u)
+
+	if err != nil {
+		return 0, page{}, err
+	}
+
+	if !f.ignoreFragments && fr != "" {
+		if _, ok := scrape.Find(p.Body(), func(n *html.Node) bool {
+			return scrape.Attr(n, "id") == fr
+		}); !ok {
+			return 0, page{}, fmt.Errorf("id #%v not found", fr)
+		}
+	}
+
+	return c, p, nil
+}
+
+func (f fetcher) sendRequest(u string) (int, page, error) {
+	f.connectionSemaphore.Request()
+	defer f.connectionSemaphore.Release()
+
+	req, res := fasthttp.Request{}, fasthttp.Response{}
+	req.SetRequestURI(u)
+
+redirects:
+	for {
+		err := f.client.Do(&req, &res)
+
+		if err != nil {
+			return 0, page{}, err
+		}
+
+		switch res.StatusCode() / 100 {
+		case 2:
+			break redirects
+		case 3:
+			bs := res.Header.Peek("Location")
+
+			if len(bs) == 0 {
+				return 0, page{}, errors.New("location header not found")
+			}
+
+			req.SetRequestURIBytes(bs)
+		default:
+			return 0, page{}, fmt.Errorf("%v", res.StatusCode())
+		}
+	}
+
+	n, err := html.Parse(bytes.NewReader(res.Body()))
+
+	if err != nil {
+		return 0, page{}, err
+	}
+
+	return res.StatusCode(), newPage(req.URI().String(), n), nil
 }
 
 func separateFragment(s string) (string, string, error) {
@@ -87,8 +126,8 @@ func separateFragment(s string) (string, string, error) {
 		return "", "", err
 	}
 
-	id := u.Fragment
+	f := u.Fragment
 	u.Fragment = ""
 
-	return u.String(), id, nil
+	return u.String(), f, nil
 }

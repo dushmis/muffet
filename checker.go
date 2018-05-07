@@ -1,38 +1,28 @@
 package main
 
 import (
-	"fmt"
-	"net/url"
 	"sync"
 
-	"github.com/yhat/scrape"
-	"golang.org/x/net/html"
-	"golang.org/x/net/html/atom"
+	"github.com/fatih/color"
 )
 
-var validSchemes = map[string]struct{}{
-	"":      {},
-	"http":  {},
-	"https": {},
-}
-
-var atomToAttribute = map[atom.Atom]string{
-	atom.A:    "href",
-	atom.Img:  "src",
-	atom.Link: "href",
-}
-
 type checker struct {
-	fetcher   fetcher
-	daemons   daemons
-	hostname  string
-	results   chan result
-	donePages concurrentStringSet
+	fetcher      fetcher
+	daemons      daemons
+	urlInspector urlInspector
+	results      chan pageResult
+	donePages    concurrentStringSet
 }
 
-func newChecker(s string, c int) (checker, error) {
-	f := newFetcher(c)
-	p, err := f.Fetch(s)
+func newChecker(s string, c int, i, r, sm bool) (checker, error) {
+	f := newFetcher(c, i)
+	p, err := f.FetchPage(s)
+
+	if err != nil {
+		return checker{}, err
+	}
+
+	ui, err := newURLInspector(p.URL().String(), r, sm)
 
 	if err != nil {
 		return checker{}, err
@@ -41,17 +31,17 @@ func newChecker(s string, c int) (checker, error) {
 	ch := checker{
 		f,
 		newDaemons(c),
-		p.URL().Hostname(),
-		make(chan result, c),
+		ui,
+		make(chan pageResult, c),
 		newConcurrentStringSet(),
 	}
 
-	ch.daemons.Add(func() { ch.checkPage(*p) })
+	ch.addPage(p)
 
 	return ch, nil
 }
 
-func (c checker) Results() <-chan result {
+func (c checker) Results() <-chan pageResult {
 	return c.results
 }
 
@@ -62,54 +52,46 @@ func (c checker) Check() {
 }
 
 func (c checker) checkPage(p page) {
-	ns := scrape.FindAll(p.Body(), func(n *html.Node) bool {
-		_, ok := atomToAttribute[n.DataAtom]
-		return ok
-	})
+	bs, es := scrapePage(p)
 
-	sc, ec := make(chan string, len(ns)), make(chan string, len(ns))
+	ec := make(chan string, len(bs)+len(es))
+
+	for u, err := range es {
+		ec <- formatLinkError(u, err)
+	}
+
+	sc := make(chan string, len(bs))
 	w := sync.WaitGroup{}
 
-	for _, n := range ns {
+	for u, b := range bs {
 		w.Add(1)
 
-		go func(n *html.Node) {
+		go func(u string, isHTML bool) {
 			defer w.Done()
 
-			u, err := url.Parse(scrape.Attr(n, atomToAttribute[n.DataAtom]))
-
-			if err != nil {
-				ec <- err.Error()
-				return
-			}
-
-			if _, ok := validSchemes[u.Scheme]; !ok {
-				return
-			}
-
-			if !u.IsAbs() {
-				u = p.URL().ResolveReference(u)
-			}
-
-			p, err := c.fetcher.Fetch(u.String())
+			r, err := c.fetcher.FetchLink(u)
 
 			if err == nil {
-				sc <- u.String()
+				sc <- formatLinkSuccess(u, r.StatusCode())
 			} else {
-				ec <- fmt.Sprintf("%v (%v)", u, err)
+				ec <- formatLinkError(u, err)
 			}
 
-			if n.DataAtom == atom.A && p != nil && !c.donePages.Add(p.URL().String()) && p.URL().Hostname() == c.hostname {
-				c.daemons.Add(func() {
-					c.checkPage(*p)
-				})
+			if p, ok := r.Page(); ok && isHTML && c.urlInspector.Inspect(p.URL()) {
+				c.addPage(p)
 			}
-		}(n)
+		}(u, b)
 	}
 
 	w.Wait()
 
-	c.results <- newResult(p.URL().String(), stringChannelToSlice(sc), stringChannelToSlice(ec))
+	c.results <- newPageResult(p.URL().String(), stringChannelToSlice(sc), stringChannelToSlice(ec))
+}
+
+func (c checker) addPage(p page) {
+	if !c.donePages.Add(p.URL().String()) {
+		c.daemons.Add(func() { c.checkPage(p) })
+	}
 }
 
 func stringChannelToSlice(sc <-chan string) []string {
@@ -120,4 +102,12 @@ func stringChannelToSlice(sc <-chan string) []string {
 	}
 
 	return ss
+}
+
+func formatLinkSuccess(u string, s int) string {
+	return color.GreenString("%v", s) + "\t" + u
+}
+
+func formatLinkError(u string, err error) string {
+	return color.RedString(err.Error()) + "\t" + u
 }

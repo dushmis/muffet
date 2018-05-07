@@ -10,17 +10,23 @@ import (
 const usage = `Muffet, the web repairgirl
 
 Usage:
-	muffet [-c <concurrency>] [-v] <url>
+	muffet [-c <concurrency>] [-f] [-r] [-s] [-v] <url>
 
 Options:
 	-c, --concurrency <concurrency>  Roughly maximum number of concurrent HTTP connections. [default: 512]
-	-h, --help  Show this help.
-	-v, --verbose  Show successful results too.`
+	-f, --ignore-fragments           Ignore URL fragments.
+	-h, --help                       Show this help.
+	-r, --follow-robots-txt          Follow robots.txt when scraping.
+	-s, --follow-sitemap-xml         Scrape only pages listed in sitemap.xml.
+	-v, --verbose                    Show successful results too.`
 
 type arguments struct {
-	concurrency int
-	url         string
-	verbose     bool
+	concurrency      int
+	url              string
+	verbose          bool
+	ignoreFragments  bool
+	followSitemapXML bool
+	followRobotsTxt  bool
 }
 
 func getArguments(ss []string) (arguments, error) {
@@ -28,7 +34,7 @@ func getArguments(ss []string) (arguments, error) {
 		ss = os.Args[1:]
 	}
 
-	args, err := docopt.ParseArgs(usage, ss, "0.1.0")
+	args, err := docopt.ParseArgs(usage, ss, "0.3.0")
 
 	if err != nil {
 		return arguments{}, err
@@ -40,5 +46,12 @@ func getArguments(ss []string) (arguments, error) {
 		return arguments{}, err
 	}
 
-	return arguments{int(c), args["<url>"].(string), args["--verbose"].(bool)}, nil
+	return arguments{
+		int(c),
+		args["<url>"].(string),
+		args["--verbose"].(bool),
+		args["--ignore-fragments"].(bool),
+		args["--follow-sitemap-xml"].(bool),
+		args["--follow-robots-txt"].(bool),
+	}, nil
 }
